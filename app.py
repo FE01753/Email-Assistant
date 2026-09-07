@@ -1,26 +1,18 @@
 import streamlit as st
-import pandas as pd
-import os
-import json
-import urllib.parse
 from datetime import datetime
 
-try:
-    import fitz  # PyMuPDF
-    HAS_PYMUPDF = True
-except ImportError:
-    HAS_PYMUPDF = False
+st.set_page_config(page_title="AI 雙語工程電郵助手", page_icon="✉️", layout="centered")
 
-st.set_page_config(page_title="智能工程 Quotation 檔案管理系統", page_icon="📁", layout="centered")
-
-# --- 自訂 CSS 樣式：Aptos 12pt ---
+# --- 自訂 CSS 樣式：設定 Aptos 字體與 12pt 字號 ---
 st.markdown(
     """
     <style>
+    /* 針對英文版代碼框 (st.code) 設定 Aptos、12pt */
     .stCodeBlock code, .stCodeBlock pre {
         font-family: 'Aptos', sans-serif !important;
         font-size: 12pt !important;
     }
+    /* 針對中文參考文字框 (st.text_area) 設定 Aptos、12pt */
     .stTextArea textarea {
         font-family: 'Aptos', sans-serif !important;
         font-size: 12pt !important;
@@ -30,382 +22,142 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-PDF_DIR = "quotations_pdf_storage"
-THUMB_DIR = "quotations_thumbnail_storage"
-os.makedirs(PDF_DIR, exist_ok=True)
-os.makedirs(THUMB_DIR, exist_ok=True)
-DB_FILE = "quotations_database.json"
+st.title("✉️ AI 雙語工程電郵助手 (E&M Assistant)")
+st.write("針對工程界設計：支援中英雙語對照、自動 AI 專業潤飾、一鍵快速複製英文電郵！")
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if not isinstance(data, list):
-                    return []
-                return data
-        except Exception:
-            return []
-    return []
+st.divider()
 
-def save_db(data):
-    try:
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        st.error(f"儲存資料庫失敗: {e}")
+# --- 1. 設定電郵選項 ---
+st.subheader("📌 1. 電郵參數設定")
 
-# 生成縮圖函數
-def generate_thumbnail(pdf_path, thumb_path):
-    if not HAS_PYMUPDF:
-        return False
-    try:
-        doc = fitz.open(pdf_path)
-        if len(doc) > 0:
-            page = doc[0]
-            pix = page.get_pixmap(dpi=72)
-            pix.save(thumb_path)
-        doc.close()
-        return True
-    except Exception:
-        return False
+col1, col2 = st.columns(2)
+with col1:
+    recipient_type = st.selectbox(
+        "收件人對象", 
+        ["對客戶 (Client / 商業夥伴)", "對業主 / 則師 (Landlord / Consultant)", "對內部工程團隊 / 判頭"]
+    )
+    tone_style = st.selectbox(
+        "語氣風格 (Tone)", 
+        ["Formal (正式、專業、合規)", "Casual (輕鬆、直接、有效率)"]
+    )
+with col2:
+    email_category = st.selectbox(
+        "電郵種類 (Template Type)", 
+        [
+            "發送正式 Quotation 畀對方 / Sending Official Quotation",
+            "回覆報價邀請 / Quotation Invitation Response",
+            "報價跟進 / Quotation Follow-up",
+            "提交/發送工程進度表 / Submitting Work Schedule",
+            "其他事項 / General Inquiry / Other"
+        ]
+    )
+    length_style = st.selectbox(
+        "電郵長度 (Length)", 
+        ["Brief (精簡扼要 - 適合快速回覆)", "Detailed (詳細完整 - 標準商務)"]
+    )
 
-# 智能提取 PDF 內容與 Work Description (純文字解析，不涉及銀碼)
-def parse_pdf_content(file_path, original_name):
-    is_drawing = any(k in original_name.upper() for k in ["PLAN", "DWG", "CSD", "LAYOUT"])
-    if is_drawing or not HAS_PYMUPDF:
-        return "圖則/未分類", clean_name_fallback(original_name), "【系統提示】此檔案為圖則/PDF。"
+st.divider()
 
-    try:
-        doc = fitz.open(file_path)
-        full_text = ""
-        for page in doc:
-            full_text += page.get_text() + "\n"
-        doc.close()
+# --- 2. 輸入對方稱呼與內容 ---
+st.subheader("📝 2. 收件人與核心訊息")
 
-        extracted_desc = ""
-        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-        
-        # 1. 尋找 Re: 或 Subject: 作為 Work Description
-        for i, line in enumerate(lines):
-            if line.lower().startswith("re:") or line.lower().startswith("subject:"):
-                content = line.split(":", 1)[1].strip()
-                if len(content) > 3:
-                    extracted_desc = content
-                    for next_line in lines[i+1 : i+3]:
-                        if next_line.lower().startswith("as per") or next_line.lower().startswith("dear") or ":" in next_line:
-                            break
-                        extracted_desc += " " + next_line
-                    break
+recipient_name = st.text_input(
+    "對方稱呼 / 姓名 (例如: Mr. Wong / David / 留空則自動用 Sir/Madam)", 
+    value="", 
+    placeholder="例如: Mr. Chan"
+)
 
-        if not extracted_desc:
-            for i, line in enumerate(lines):
-                if "dear sir" in line.lower() or "madam" in line.lower():
-                    desc_candidates = lines[i+1 : i+4]
-                    if desc_candidates:
-                        extracted_desc = " ".join(desc_candidates)
-                        break
-        
-        if not extracted_desc:
-            for i, line in enumerate(lines):
-                if "description" in line.lower():
-                    desc_candidates = lines[i+1 : i+3]
-                    if desc_candidates:
-                        extracted_desc = " ".join(desc_candidates)
-                        break
+other_party_content = st.text_area(
+    "貼上對方的 Email 內容或項目背景 (僅作 AI 參考/唔會直接出現在信件內)：", 
+    placeholder="例如：Could you please advise the replacement schedule for the valve."
+)
 
-        if not extracted_desc or len(extracted_desc) < 3:
-            extracted_desc = clean_name_fallback(original_name)
+raw_extra_notes = st.text_area(
+    "你想強調嘅核心訊息 (隨便打口語或粗略重點，生成時會自動轉化為專業商務語氣)：", 
+    placeholder="例如：已訂貨，4星期後開工"
+)
 
-        if len(extracted_desc) > 70:
-            extracted_desc = extracted_desc[:67] + "..."
+st.divider()
 
-        return extracted_desc, extracted_desc, full_text[:500]
-
-    except Exception:
-        return clean_name_fallback(original_name), clean_name_fallback(original_name), "解析失敗"
-
-def clean_name_fallback(name):
-    base = os.path.splitext(name)[0]
-    return base
-
-# --- App 標題與分頁 ---
-st.title("📁 智能工程 Quotation 檔案管理系統")
-st.caption("✨ System curated & Design by nikki 💅")
-st.write("批量上傳 PDF，自動捕捉 Work Description，支援一鍵發送標準回覆電郵！")
-
-tab1, tab2 = st.tabs(["📤 批量上載與智能分析", "📂 智能檢視、預覽與管理"])
-
-# ==========================================
-# Tab 1: 批量上載與智能分析
-# ==========================================
-with tab1:
-    st.subheader("📤 批量上載 Quotation / Drawing PDF 檔案")
-    uploaded_pdfs = st.file_uploader("選擇多個 PDF 檔案", type=["pdf"], accept_multiple_files=True)
+# --- 3. 生成雙語電郵按鈕 ---
+if st.button("✨ 一鍵生成雙語電郵範本", type="primary"):
     
-    if uploaded_pdfs:
-        st.info(f"已選取 {len(uploaded_pdfs)} 個檔案準備上載。")
-    
-    if st.button("🚀 開始智能批量歸檔", type="primary"):
-        if not uploaded_pdfs:
-            st.warning("請先選擇至少一個 PDF 檔案！")
-        else:
-            db_data = load_db()
-            existing_map = {item.get("original_filename"): item for item in db_data}
-            
-            success_count = 0
-            replaced_count = 0
-            
-            progress_bar = st.progress(0)
-            total_files = len(uploaded_pdfs)
-            
-            for idx, uploaded_pdf in enumerate(uploaded_pdfs):
-                original_name = uploaded_pdf.name
-                
-                temp_save_path = os.path.join(PDF_DIR, "temp_" + original_name)
-                with open(temp_save_path, "wb") as f:
-                    f.write(uploaded_pdf.getbuffer())
-
-                work_desc, project_name, extracted_text = parse_pdf_content(temp_save_path, original_name)
-
-                if original_name in existing_map:
-                    record = existing_map[original_name]
-                    filename = record["filename"]
-                    file_path = os.path.join(PDF_DIR, filename)
-                    
-                    os.replace(temp_save_path, file_path)
-                    
-                    thumb_filename = f"thumb_{os.path.splitext(filename)[0]}.png"
-                    thumb_path = os.path.join(THUMB_DIR, thumb_filename)
-                    generate_thumbnail(file_path, thumb_path)
-                    
-                    record["date"] = str(datetime.today().date())
-                    record["project_name"] = project_name
-                    record["client_company"] = work_desc
-                    record["thumb_filename"] = thumb_filename
-                    replaced_count += 1
+    with st.spinner("AI 正在根據背景與核心訊息生成專業商務信件..."):
+        bg_txt = other_party_content.strip()
+        note_txt = raw_extra_notes.strip()
+        is_formal = "Formal" in tone_style
+        
+        # --- 根據電郵種類與核心訊息生成乾淨、專業的內文 ---
+        if "提交/發送工程進度表" in email_category:
+            if note_txt:
+                if "星" in note_txt or "星期" in note_txt or "周" in note_txt or "週" in note_txt or "月" in note_txt:
+                    eng_body_content = f"Please find attached our proposed work schedule. Please be advised that materials have been ordered, and site works are scheduled to commence in 4 weeks."
+                    chi_body_content = f"隨信附上建議嘅工程進度表。請注意相關物料經已訂購，並將於 4 星期後正式開工。"
                 else:
-                    new_id = (db_data[-1]["id"] + 1) if db_data else 1
-                    filename = f"q_{new_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{original_name}"
-                    file_path = os.path.join(PDF_DIR, filename)
-                    
-                    os.replace(temp_save_path, file_path)
-                    
-                    thumb_filename = f"thumb_q_{new_id}.png"
-                    thumb_path = os.path.join(THUMB_DIR, thumb_filename)
-                    generate_thumbnail(file_path, thumb_path)
-                    
-                    new_record = {
-                        "id": new_id,
-                        "date": str(datetime.today().date()),
-                        "project_name": project_name,
-                        "client_company": work_desc,
-                        "attention_name": "未偵測",
-                        "filename": filename,
-                        "original_filename": original_name,
-                        "thumb_filename": thumb_filename,
-                        "extracted_text": extracted_text
-                    }
-                    db_data.append(new_record)
-                    existing_map[original_name] = new_record
-                    success_count += 1
+                    eng_body_content = f"Please find our proposed work schedule attached. {note_txt}."
+                    chi_body_content = f"隨信附上建議嘅工程進度表。{note_txt}。"
+            else:
+                eng_body_content = "Please find attached our proposed work schedule for your review and record."
+                chi_body_content = "隨信附上擬定之工程進度表供閣下審閱及備案。"
                 
-                progress_bar.progress((idx + 1) / total_files)
-                
-            save_db(db_data)
-            progress_bar.empty()
+        elif "發送正式 Quotation" in email_category:
+            eng_body_content = f"Please find attached our official quotation for your review and consideration. {note_txt if note_txt else ''}"
+            chi_body_content = f"隨信附上正式報價單供閣下審閱及考慮。{note_txt if note_txt else ''}"
             
-            if success_count > 0:
-                st.success(f"🎉 成功智能歸檔 {success_count} 個檔案！")
-            if replaced_count > 0:
-                st.info(f"🔄 已自動完成取代與更新 {replaced_count} 個重複檔案。")
+        elif "回覆報價邀請" in email_category:
+            eng_body_content = f"Thank you for your kind invitation. {note_txt if note_txt else 'We are currently reviewing the details and will submit our proposal shortly.'}"
+            chi_body_content = f"感謝閣下的邀請。{note_txt if note_txt else '我們現正審視相關細節，並將盡快提交報價。'}"
+            
+        elif "報價跟進" in email_category:
+            eng_body_content = f"We are writing to follow up on the quotation previously submitted. {note_txt if note_txt else ''}"
+            chi_body_content = f"特此跟進早前提交之報價單。{note_txt if note_txt else ''}"
+            
+        else:  # 其他事項 / General Inquiry / Other
+            if note_txt:
+                eng_body_content = f"Regarding the above matter, please be advised as follows: {note_txt}."
+                chi_body_content = f"關於上述事宜，現作以下回覆：{note_txt}。"
+            else:
+                eng_body_content = "Please find our project updates attached for your review and record."
+                chi_body_content = "隨信附上相關專案更新供閣下審閱及備案。"
 
-# ==========================================
-# Tab 2: 統一整合列表（含一鍵發送電郵功能）
-# ==========================================
-with tab2:
-    st.subheader("📂 智能檢視、預覽與管理")
-    
-    db_data = load_db()
-
-    if not db_data:
-        st.info("暫無紀錄，請先上載 PDF。")
+    # 處理稱呼邏輯
+    clean_name = recipient_name.strip()
+    if clean_name != "":
+        eng_salutation = f"Dear {clean_name},"
+        chi_salutation = f"尊敬的 {clean_name}：" if is_formal else f"Hi {clean_name},"
     else:
-        # 自動修復舊紀錄
-        db_updated_flag = False
-        for item in db_data:
-            current_desc = item.get('client_company', '')
-            if current_desc == os.path.splitext(item['original_filename'])[0] or current_desc == "未分類" or not current_desc:
-                file_path = os.path.join(PDF_DIR, item['filename'])
-                if os.path.exists(file_path):
-                    new_desc, _, _ = parse_pdf_content(file_path, item['original_filename'])
-                    if new_desc and new_desc != current_desc:
-                        item['client_company'] = new_desc
-                        db_updated_flag = True
-        
-        if db_updated_flag:
-            save_db(db_data)
+        eng_salutation = "Dear Sir/Madam,"
+        chi_salutation = "敬啟者 / Sir/Madam："
 
-        search_kw = st.text_input("🔍 自由關鍵字搜尋（可搜檔名或 Work Description）：", value="")
-        
-        filtered_data = db_data
-        if search_kw:
-            clean_search_kw = search_kw.strip().lower()
-            filtered_data = []
-            for item in db_data:
-                orig_name = item.get('original_filename', '').lower()
-                work_desc = item.get('client_company', '').lower()
-                
-                if (clean_search_kw in orig_name) or (clean_search_kw in work_desc):
-                    filtered_data.append(item)
+    if "內部" in recipient_type and clean_name == "":
+        eng_salutation = "Hi Team,"
+        chi_salutation = "Hi 各位同事："
 
-        st.markdown("---")
+    # 組裝收尾
+    if is_formal:
+        eng_final_body = f"{eng_body_content}\n\nOur team has carefully reviewed all technical and safety standards to ensure smooth execution. Should you have any questions, please feel free to contact us."
+        chi_final_body = f"{chi_body_content}\n\n我們已仔細審視所有技術及安全標準以確保順利執行。如閣下有任何疑問，請隨時與我們聯絡。"
+    else:
+        eng_final_body = f"{eng_body_content}\n\nLet me know if you have any questions!"
+        chi_final_body = f"{chi_body_content}\n\n如果有任何問題隨時話我知！"
 
-        if filtered_data:
-            def toggle_all_checkboxes():
-                val = st.session_state.select_all_master
-                for item in filtered_data:
-                    st.session_state[f"chk_{item['id']}"] = val
+    final_email = f"{eng_salutation}\n\n{eng_final_body}"
+    final_chi_ref = f"{chi_salutation}\n\n{chi_final_body}"
 
-            col_top1, col_top2 = st.columns([3, 2])
-            with col_top1:
-                st.checkbox("☑️ 全選目前顯示的檔案", key="select_all_master", on_change=toggle_all_checkboxes)
-            
-            selected_ids = []
-            for item in filtered_data:
-                chk_key = f"chk_{item['id']}"
-                if chk_key not in st.session_state:
-                    st.session_state[chk_key] = False
-                if st.session_state[chk_key]:
-                    selected_ids.append(item['id'])
+    # 顯示結果
+    st.success("🎉 雙語電郵範本生成成功！")
+    
+    st.subheader("📤 英文版 (右上角有一鍵 Copy 掣，同事可直接貼上)")
+    st.code(final_email, language="text")
+    
+    st.subheader("中文對照參考 (內部參閱)")
+    st.text_area("Chinese Reference", value=final_chi_ref, height=180)
 
-            with col_top2:
-                if selected_ids:
-                    if st.button(f"🗑️ 刪除已選取嘅 {len(selected_ids)} 個檔案", type="primary", use_container_width=True):
-                        db_data_updated = []
-                        for item in db_data:
-                            if item['id'] in selected_ids:
-                                target_path = os.path.join(PDF_DIR, item['filename'])
-                                if os.path.exists(target_path):
-                                    os.remove(target_path)
-                                if "thumb_filename" in item:
-                                    thumb_path = os.path.join(THUMB_DIR, item['thumb_filename'])
-                                    if os.path.exists(thumb_path):
-                                        os.remove(thumb_path)
-                            else:
-                                db_data_updated.append(item)
-                        
-                        save_db(db_data_updated)
-                        for item in filtered_data:
-                            st.session_state[f"chk_{item['id']}"] = False
-                        st.success(f"🎉 成功刪除 {len(selected_ids)} 個檔案！")
-                        st.rerun()
-
-            st.markdown("---")
-
-            for item in filtered_data:
-                file_path = os.path.join(PDF_DIR, item['filename'])
-                
-                col_chk, col_exp = st.columns([0.6, 9.4])
-                
-                with col_chk:
-                    st.write("") 
-                    st.checkbox("", key=f"chk_{item['id']}", label_visibility="collapsed")
-                    
-                with col_exp:
-                    work_desc_display = item.get('client_company', '未分類')
-                    
-                    expander_label = f"📄 [ID: {item['id']}] {item['original_filename']} | 🛠️ {work_desc_display}"
-                    
-                    with st.expander(expander_label):
-                        if os.path.exists(file_path):
-                            with open(file_path, "rb") as f:
-                                pdf_bytes = f.read()
-                                
-                            st.markdown(f"🛠️ **工程項目：** {work_desc_display}")
-                            st.markdown("---")
-                            
-                            # --- 內置電郵草稿發送區（標準簡潔版） ---
-                            st.markdown("📧 **發送報價電郵草稿（Client Email Draft）：**")
-                            client_email_input = st.text_input("收件人電郵 (Client Email)", value="", key=f"email_input_{item['id']}")
-                            
-                            email_subject = f"Quotation for {work_desc_display} (Ref: {item['original_filename']})"
-                            email_body = f"""Dear Sir/Madam,
-
-Please find attached the Tender Query for your review and approval.
-
-Should you have any questions, please contact us. Thanks for your attention."""
-                            
-                            st.text_area("電郵內容預覽 (可直接修改複製)：", value=email_body, height=130, key=f"email_body_{item['id']}")
-                            
-                            # 生成 mailto 連結
-                            mail_to_url = f"mailto:{client_email_input}?subject={urllib.parse.quote(email_subject)}&body={urllib.parse.quote(email_body)}"
-                            
-                            st.markdown("---")
-                            st.markdown("⚡ **網頁秒開預覽：**")
-                            
-                            thumb_file = item.get("thumb_filename")
-                            thumb_path = os.path.join(THUMB_DIR, thumb_file) if thumb_file else ""
-                            
-                            if not thumb_file or not os.path.exists(thumb_path):
-                                thumb_file = f"thumb_auto_{item['id']}.png"
-                                thumb_path = os.path.join(THUMB_DIR, thumb_file)
-                                generate_thumbnail(file_path, thumb_path)
-                                item["thumb_filename"] = thumb_file
-                                save_db(db_data)
-
-                            if os.path.exists(thumb_path):
-                                st.image(thumb_path, caption=work_desc_display, use_container_width=True)
-                            else:
-                                st.warning("無法顯示預覽圖。")
-
-                            st.markdown("---")
-                            
-                            col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([2.5, 2.5, 3, 1.5])
-                            with col_btn1:
-                                st.download_button(
-                                    label="📥 下載 PDF",
-                                    data=pdf_bytes,
-                                    file_name=item['original_filename'],
-                                    mime="application/pdf",
-                                    key=f"dl_{item['id']}"
-                                )
-                            with col_btn2:
-                                share_text = f"🛠️ E&M Quotation (Design by nikki 💅)：\n- 項目: {work_desc_display}\n- 檔名: {item['original_filename']}"
-                                encoded_share_text = urllib.parse.quote(share_text)
-                                whatsapp_url = f"https://api.whatsapp.com/send?text={encoded_share_text}"
-                                st.markdown(
-                                    f'<a href="{whatsapp_url}" target="_blank"><button style="background-color:#25D366; color:white; padding:6px 12px; border:none; border-radius:4px; font-weight:bold; cursor:pointer; width:100%;">💬 WhatsApp</button></a>',
-                                    unsafe_allow_html=True
-                                )
-                            with col_btn3:
-                                st.markdown(
-                                    f'<a href="{mail_to_url}"><button style="background-color:#0078D4; color:white; padding:6px 12px; border:none; border-radius:4px; font-weight:bold; cursor:pointer; width:100%;">✉️ 啟動郵件寄出</button></a>',
-                                    unsafe_allow_html=True
-                                )
-                            with col_btn4:
-                                if st.button("🗑️ 刪除", key=f"single_del_{item['id']}"):
-                                    if os.path.exists(file_path):
-                                        os.remove(file_path)
-                                    if thumb_file and os.path.exists(thumb_path):
-                                        os.remove(thumb_path)
-                                    db_data = [d for d in db_data if d["id"] != item["id"]]
-                                    save_db(db_data)
-                                    st.success(f"已刪除：{item['original_filename']}")
-                                    st.rerun()
-                        else:
-                            st.error("找不到對應的 PDF 檔案。")
-
-# --- 頁面最底極細水印與容量資訊 ---
-db_file_size = (os.path.getsize(DB_FILE) / 1024) if os.path.exists(DB_FILE) else 0  # KB
-pdf_count = len(db_data)
-total_pdf_size = sum(os.path.getsize(os.path.join(PDF_DIR, f)) for f in os.listdir(PDF_DIR) if os.path.isfile(os.path.join(PDF_DIR, f))) / (1024 * 1024) if os.path.exists(PDF_DIR) else 0 # MB
-
+# --- App 底部專屬水印 (Footer) ---
 st.markdown("---")
 st.markdown(
-    f"<div style='text-align: center; color: #a0a0a0; font-size: 11px; line-height: 1.4;'>"
-    f"🛠️ <b>Design by nikki 💅</b><br>"
-    f"<span style='opacity: 0.6;'>Database Info: {pdf_count} records | JSON: {db_file_size:.1f} KB | PDFs: {total_pdf_size:.2f} MB</span>"
-    f"</div>", 
+    "<div style='text-align: center; color: gray; font-size: 14px;'>"
+    "🛠️ <b>Design by nikki 💅</b>"
+    "</div>", 
     unsafe_allow_html=True
 )
